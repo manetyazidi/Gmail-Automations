@@ -62,7 +62,7 @@ def run(*, dry_run: bool = False) -> int:
     lookback_hours = int(os.environ.get("NEWS_LOOKBACK_HOURS", "24"))
 
     gmail_sender = _required("GMAIL_SENDER")
-    digest_to = _required("DIGEST_TO")
+    digest_to = os.environ.get("DIGEST_TO") or gmail_sender
 
     gmail: GmailClient | None = None
     if not dry_run:
