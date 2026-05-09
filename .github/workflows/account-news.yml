@@ -4,7 +4,7 @@ on:
   schedule:
     # 7:00 AM America/Chicago = 12:00 UTC (CST) / 13:00 UTC (CDT).
     # GitHub Actions cron is UTC-only; using 12:00 UTC means delivery is
-    # 7am CST in winter, 8am CDT in summer. Adjust if you need strict 7am.
+    # 7am CST in winter, 8am CDT in summer.
     - cron: "0 12 * * *"
   workflow_dispatch:
 
@@ -33,13 +33,8 @@ jobs:
 
       - name: Run digest
         env:
-          AE_EMAIL: ${{ secrets.AE_EMAIL }}
-          DIGEST_TO: ${{ secrets.DIGEST_TO }}
           GMAIL_SENDER: ${{ secrets.GMAIL_SENDER }}
-          SF_CLIENT_ID: ${{ secrets.SF_CLIENT_ID }}
-          SF_CLIENT_SECRET: ${{ secrets.SF_CLIENT_SECRET }}
-          SF_REFRESH_TOKEN: ${{ secrets.SF_REFRESH_TOKEN }}
-          SF_LOGIN_URL: ${{ secrets.SF_LOGIN_URL }}
+          DIGEST_CC: ${{ secrets.DIGEST_CC }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           GOOGLE_CSE_ID: ${{ secrets.GOOGLE_CSE_ID }}
           NEWS_LOOKBACK_HOURS: "24"

@@ -21,7 +21,7 @@ py-modules = [
     "nudger",
     "recap",
     "config",
-    "salesforce_client",
+    "csv_accounts",
     "news_search",
     "news_classifier",
     "account_news",

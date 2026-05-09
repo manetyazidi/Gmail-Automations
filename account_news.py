@@ -1,30 +1,38 @@
-"""Daily account-news digest: Salesforce -> news search -> Gmail."""
+"""Daily account-news digest: per-AE CSV -> news search -> Gmail.
+
+Reads one CSV per AE from accounts/<ae_email>.csv, searches the web for
+M&A / funding / IPO news for each account in the last 24h, and emails
+each AE their digest. If an AE has no qualifying news, sends a short
+"all up to date" note instead.
+"""
 
 from __future__ import annotations
 
 import argparse
+import base64
 import logging
 import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime
+from email.message import EmailMessage
 from html import escape
 from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
 
+from csv_accounts import AeCsv, CsvAccount, load_aes
 from gmail_client import GmailClient
 from news_classifier import ClassifiedHit, classify_all
 from news_search import search_account
-from salesforce_client import SalesforceAccount, SalesforceClient
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class AccountReport:
-    account: SalesforceAccount
+    account: CsvAccount
     hits: list[ClassifiedHit]
 
 
@@ -42,79 +50,109 @@ def run(*, dry_run: bool = False) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    ae_email = _required("AE_EMAIL")
-    digest_to = os.environ.get("DIGEST_TO", ae_email)
-
-    sf = SalesforceClient(
-        client_id=_required("SF_CLIENT_ID"),
-        client_secret=_required("SF_CLIENT_SECRET"),
-        refresh_token=_required("SF_REFRESH_TOKEN"),
-        login_url=os.environ.get("SF_LOGIN_URL", "https://login.salesforce.com"),
-    )
-
-    accounts = sf.accounts_owned_by(ae_email)
-    logger.info("Loaded %d accounts owned by %s", len(accounts), ae_email)
+    accounts_dir = Path(os.environ.get("ACCOUNTS_DIR", "accounts"))
+    aes = load_aes(accounts_dir)
+    if not aes:
+        logger.error("No AE CSV files found in %s", accounts_dir)
+        return 1
 
     google_api_key = os.environ.get("GOOGLE_API_KEY")
     google_cse_id = os.environ.get("GOOGLE_CSE_ID")
     lookback_hours = int(os.environ.get("NEWS_LOOKBACK_HOURS", "24"))
+    cc_addr = os.environ.get("DIGEST_CC")
 
-    reports: list[AccountReport] = []
+    gmail_sender = _required("GMAIL_SENDER")
+
+    gmail: GmailClient | None = None
+    if not dry_run:
+        gmail = GmailClient(
+            credentials_path=Path(
+                os.environ.get("GMAIL_CREDENTIALS_PATH", "credentials.json")
+            ),
+            token_path=Path(os.environ.get("GMAIL_TOKEN_PATH", "token.json")),
+        )
+
     with httpx.Client(timeout=15.0) as http:
-        for account in accounts:
-            try:
-                hits = search_account(
-                    account.name,
-                    google_api_key=google_api_key,
-                    google_cse_id=google_cse_id,
-                    lookback_hours=lookback_hours,
-                    http=http,
-                )
-            except Exception as exc:
-                logger.exception("News search failed for %s: %s", account.name, exc)
-                hits = []
-            classified = classify_all(hits)
-            if classified:
-                logger.info("%s: %d relevant hits", account.name, len(classified))
-            reports.append(AccountReport(account=account, hits=classified))
+        for ae in aes:
+            logger.info(
+                "Processing AE %s (%s): %d accounts",
+                ae.display_name, ae.email, len(ae.accounts),
+            )
+            reports = _gather_reports(ae, http, google_api_key, google_cse_id, lookback_hours)
+            subject, html_body, text_body = _compose_email(ae, reports)
 
-    subject, html_body, text_body = _compose_email(
-        reports=reports,
-        instance_url=sf.instance_url,
-        ae_email=ae_email,
-    )
+            if dry_run:
+                print("=" * 60)
+                print(f"To: {ae.email}")
+                print(f"Subject: {subject}")
+                print()
+                print(text_body)
+                print()
+                continue
 
-    if dry_run:
-        print(subject)
-        print()
-        print(text_body)
-        return 0
+            assert gmail is not None
+            _send_html(
+                gmail,
+                from_addr=gmail_sender,
+                to_addr=ae.email,
+                cc_addr=cc_addr,
+                subject=subject,
+                html_body=html_body,
+                text_body=text_body,
+            )
+            logger.info("Sent digest to %s", ae.email)
 
-    gmail = GmailClient(
-        credentials_path=Path(os.environ.get("GMAIL_CREDENTIALS_PATH", "credentials.json")),
-        token_path=Path(os.environ.get("GMAIL_TOKEN_PATH", "token.json")),
-    )
-    _send_html(
-        gmail,
-        from_addr=_required("GMAIL_SENDER"),
-        to_addr=digest_to,
-        subject=subject,
-        html_body=html_body,
-        text_body=text_body,
-    )
-    logger.info("Sent digest to %s", digest_to)
     return 0
 
 
+def _gather_reports(
+    ae: AeCsv,
+    http: httpx.Client,
+    google_api_key: str | None,
+    google_cse_id: str | None,
+    lookback_hours: int,
+) -> list[AccountReport]:
+    reports: list[AccountReport] = []
+    for account in ae.accounts:
+        try:
+            hits = search_account(
+                account.name,
+                google_api_key=google_api_key,
+                google_cse_id=google_cse_id,
+                lookback_hours=lookback_hours,
+                http=http,
+            )
+        except Exception as exc:
+            logger.exception("News search failed for %s: %s", account.name, exc)
+            hits = []
+        reports.append(AccountReport(account=account, hits=classify_all(hits)))
+    return reports
+
+
 def _compose_email(
-    *,
-    reports: list[AccountReport],
-    instance_url: str,
-    ae_email: str,
+    ae: AeCsv, reports: list[AccountReport]
 ) -> tuple[str, str, str]:
     today = datetime.now().strftime("%a %b %d, %Y")
     accounts_with_news = [r for r in reports if r.hits]
     total_hits = sum(len(r.hits) for r in accounts_with_news)
+
+    if not accounts_with_news:
+        subject = f"[Account News] {today} — All up to date"
+        html_body = (
+            "<html><body>"
+            f"<p>Good morning {escape(ae.display_name.split()[0])},</p>"
+            f"<p>Scanned <b>{len(reports)}</b> account(s). "
+            "No M&amp;A, funding, or IPO news in the last 24 hours.</p>"
+            "<p>All up to date.</p>"
+            "</body></html>"
+        )
+        text_body = (
+            f"Good morning {ae.display_name.split()[0]},\n\n"
+            f"Scanned {len(reports)} account(s). "
+            "No M&A, funding, or IPO news in the last 24 hours.\n\n"
+            "All up to date."
+        )
+        return subject, html_body, text_body
 
     subject = (
         f"[Account News] {today} — {total_hits} item(s) across "
@@ -122,48 +160,52 @@ def _compose_email(
     )
 
     html_parts = [
-        f"<p>Daily M&amp;A / Funding / IPO digest for <b>{escape(ae_email)}</b> — {escape(today)}</p>",
-        f"<p>{len(reports)} accounts scanned, {len(accounts_with_news)} with news.</p>",
+        f"<p>Good morning {escape(ae.display_name.split()[0])},</p>",
+        f"<p>{len(reports)} accounts scanned, "
+        f"<b>{len(accounts_with_news)}</b> with news today.</p>",
     ]
     text_parts = [
-        f"Daily M&A / Funding / IPO digest for {ae_email} - {today}",
-        f"{len(reports)} accounts scanned, {len(accounts_with_news)} with news.",
+        f"Good morning {ae.display_name.split()[0]},",
+        "",
+        f"{len(reports)} accounts scanned, "
+        f"{len(accounts_with_news)} with news today.",
         "",
     ]
 
-    if not accounts_with_news:
-        html_parts.append("<p><i>No qualifying news found in the last 24 hours.</i></p>")
-        text_parts.append("No qualifying news found in the last 24 hours.")
-    else:
-        for report in accounts_with_news:
-            sf_url = report.account.record_url(instance_url)
-            html_parts.append(
-                f'<h3><a href="{escape(sf_url)}">{escape(report.account.name)}</a></h3>'
+    for report in accounts_with_news:
+        if report.account.salesforce_url:
+            heading = (
+                f'<h3><a href="{escape(report.account.salesforce_url)}">'
+                f"{escape(report.account.name)}</a></h3>"
             )
-            text_parts.append(f"== {report.account.name} ==")
-            text_parts.append(f"Salesforce: {sf_url}")
+        else:
+            heading = f"<h3>{escape(report.account.name)}</h3>"
+        html_parts.append(heading)
+        text_parts.append(f"== {report.account.name} ==")
+        if report.account.salesforce_url:
+            text_parts.append(f"Salesforce: {report.account.salesforce_url}")
 
-            html_parts.append("<ul>")
-            for c in report.hits:
-                tags = ", ".join(cat.value for cat in c.categories)
-                published = (
-                    c.hit.published_at.strftime("%Y-%m-%d %H:%M")
-                    if c.hit.published_at
-                    else "n/a"
-                )
-                source = c.hit.source or "source"
-                html_parts.append(
-                    "<li>"
-                    f"<b>[{escape(tags)}]</b> "
-                    f'<a href="{escape(c.hit.url)}">{escape(c.hit.title)}</a> '
-                    f"<span style=\"color:#666\">— {escape(source)} · {escape(published)}</span>"
-                    "</li>"
-                )
-                text_parts.append(f"  [{tags}] {c.hit.title}")
-                text_parts.append(f"    {source} · {published}")
-                text_parts.append(f"    {c.hit.url}")
-            html_parts.append("</ul>")
-            text_parts.append("")
+        html_parts.append("<ul>")
+        for c in report.hits:
+            tags = ", ".join(cat.value for cat in c.categories)
+            published = (
+                c.hit.published_at.strftime("%Y-%m-%d %H:%M")
+                if c.hit.published_at
+                else "n/a"
+            )
+            source = c.hit.source or "source"
+            html_parts.append(
+                "<li>"
+                f"<b>[{escape(tags)}]</b> "
+                f'<a href="{escape(c.hit.url)}">{escape(c.hit.title)}</a> '
+                f'<span style="color:#666">— {escape(source)} · {escape(published)}</span>'
+                "</li>"
+            )
+            text_parts.append(f"  [{tags}] {c.hit.title}")
+            text_parts.append(f"    {source} · {published}")
+            text_parts.append(f"    {c.hit.url}")
+        html_parts.append("</ul>")
+        text_parts.append("")
 
     html_body = "<html><body>" + "\n".join(html_parts) + "</body></html>"
     text_body = "\n".join(text_parts)
@@ -175,22 +217,22 @@ def _send_html(
     *,
     from_addr: str,
     to_addr: str,
+    cc_addr: str | None,
     subject: str,
     html_body: str,
     text_body: str,
 ) -> str:
-    import base64
-    from email.message import EmailMessage
-
     msg = EmailMessage()
     msg["From"] = from_addr
     msg["To"] = to_addr
+    if cc_addr:
+        msg["Cc"] = cc_addr
     msg["Subject"] = subject
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     sent = (
-        gmail._service.users()  # noqa: SLF001 - reuse existing client
+        gmail._service.users()  # noqa: SLF001
         .messages()
         .send(userId="me", body={"raw": raw})
         .execute()
@@ -200,7 +242,9 @@ def _send_html(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Daily account-news digest")
-    parser.add_argument("--dry-run", action="store_true", help="Print email instead of sending")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print emails instead of sending"
+    )
     args = parser.parse_args()
     return run(dry_run=args.dry_run)
 
