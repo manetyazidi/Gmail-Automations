@@ -34,8 +34,9 @@ jobs:
       - name: Run digest
         env:
           GMAIL_SENDER: ${{ secrets.GMAIL_SENDER }}
-          DIGEST_CC: ${{ secrets.DIGEST_CC }}
+          DIGEST_TO: ${{ secrets.DIGEST_TO }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           GOOGLE_CSE_ID: ${{ secrets.GOOGLE_CSE_ID }}
+          TIER_FILTER: ${{ vars.TIER_FILTER }}
           NEWS_LOOKBACK_HOURS: "24"
         run: python account_news.py

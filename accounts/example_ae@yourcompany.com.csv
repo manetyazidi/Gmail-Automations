@@ -1,4 +1,0 @@
-# ae_name=Example AE
-Account Name,Salesforce URL,Website
-Acme Corp,https://yourcompany.lightning.force.com/lightning/r/Account/001XXXXXXXXXXXXXXX/view,acme.com
-Globex Industries,https://yourcompany.lightning.force.com/lightning/r/Account/001YYYYYYYYYYYYYYY/view,globex.com

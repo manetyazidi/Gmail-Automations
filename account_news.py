@@ -22,7 +22,7 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
-from csv_accounts import AeCsv, CsvAccount, load_aes
+from csv_accounts import AeCsv, CsvAccount, load_aes, parse_tier_filter
 from gmail_client import GmailClient
 from news_classifier import ClassifiedHit, classify_all
 from news_search import search_account
@@ -51,7 +51,8 @@ def run(*, dry_run: bool = False) -> int:
     )
 
     accounts_dir = Path(os.environ.get("ACCOUNTS_DIR", "accounts"))
-    aes = load_aes(accounts_dir)
+    tier_filter = parse_tier_filter(os.environ.get("TIER_FILTER"))
+    aes = load_aes(accounts_dir, tier_filter=tier_filter)
     if not aes:
         logger.error("No AE CSV files found in %s", accounts_dir)
         return 1
@@ -59,9 +60,9 @@ def run(*, dry_run: bool = False) -> int:
     google_api_key = os.environ.get("GOOGLE_API_KEY")
     google_cse_id = os.environ.get("GOOGLE_CSE_ID")
     lookback_hours = int(os.environ.get("NEWS_LOOKBACK_HOURS", "24"))
-    cc_addr = os.environ.get("DIGEST_CC")
 
     gmail_sender = _required("GMAIL_SENDER")
+    digest_to = _required("DIGEST_TO")
 
     gmail: GmailClient | None = None
     if not dry_run:
@@ -75,15 +76,15 @@ def run(*, dry_run: bool = False) -> int:
     with httpx.Client(timeout=15.0) as http:
         for ae in aes:
             logger.info(
-                "Processing AE %s (%s): %d accounts",
-                ae.display_name, ae.email, len(ae.accounts),
+                "Processing AE %s: %d accounts",
+                ae.display_name, len(ae.accounts),
             )
             reports = _gather_reports(ae, http, google_api_key, google_cse_id, lookback_hours)
             subject, html_body, text_body = _compose_email(ae, reports)
 
             if dry_run:
                 print("=" * 60)
-                print(f"To: {ae.email}")
+                print(f"To: {digest_to}")
                 print(f"Subject: {subject}")
                 print()
                 print(text_body)
@@ -94,13 +95,12 @@ def run(*, dry_run: bool = False) -> int:
             _send_html(
                 gmail,
                 from_addr=gmail_sender,
-                to_addr=ae.email,
-                cc_addr=cc_addr,
+                to_addr=digest_to,
                 subject=subject,
                 html_body=html_body,
                 text_body=text_body,
             )
-            logger.info("Sent digest to %s", ae.email)
+            logger.info("Sent %s digest to %s", ae.display_name, digest_to)
 
     return 0
 
@@ -137,17 +137,17 @@ def _compose_email(
     total_hits = sum(len(r.hits) for r in accounts_with_news)
 
     if not accounts_with_news:
-        subject = f"[Account News] {today} — All up to date"
+        subject = f"[{ae.display_name}] {today} — All up to date"
         html_body = (
             "<html><body>"
-            f"<p>Good morning {escape(ae.display_name.split()[0])},</p>"
+            f"<p>Daily digest for <b>{escape(ae.display_name)}</b> — {escape(today)}</p>"
             f"<p>Scanned <b>{len(reports)}</b> account(s). "
             "No M&amp;A, funding, or IPO news in the last 24 hours.</p>"
             "<p>All up to date.</p>"
             "</body></html>"
         )
         text_body = (
-            f"Good morning {ae.display_name.split()[0]},\n\n"
+            f"Daily digest for {ae.display_name} - {today}\n\n"
             f"Scanned {len(reports)} account(s). "
             "No M&A, funding, or IPO news in the last 24 hours.\n\n"
             "All up to date."
@@ -155,17 +155,17 @@ def _compose_email(
         return subject, html_body, text_body
 
     subject = (
-        f"[Account News] {today} — {total_hits} item(s) across "
+        f"[{ae.display_name}] {today} — {total_hits} item(s) across "
         f"{len(accounts_with_news)} account(s)"
     )
 
     html_parts = [
-        f"<p>Good morning {escape(ae.display_name.split()[0])},</p>",
+        f"<p>Daily digest for <b>{escape(ae.display_name)}</b> — {escape(today)}</p>",
         f"<p>{len(reports)} accounts scanned, "
         f"<b>{len(accounts_with_news)}</b> with news today.</p>",
     ]
     text_parts = [
-        f"Good morning {ae.display_name.split()[0]},",
+        f"Daily digest for {ae.display_name} - {today}",
         "",
         f"{len(reports)} accounts scanned, "
         f"{len(accounts_with_news)} with news today.",
@@ -217,7 +217,6 @@ def _send_html(
     *,
     from_addr: str,
     to_addr: str,
-    cc_addr: str | None,
     subject: str,
     html_body: str,
     text_body: str,
@@ -225,8 +224,6 @@ def _send_html(
     msg = EmailMessage()
     msg["From"] = from_addr
     msg["To"] = to_addr
-    if cc_addr:
-        msg["Cc"] = cc_addr
     msg["Subject"] = subject
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
