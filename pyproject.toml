@@ -13,4 +13,16 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = ["main", "db", "outreach", "gmail_client", "nudger", "recap", "config"]
+py-modules = [
+    "main",
+    "db",
+    "outreach",
+    "gmail_client",
+    "nudger",
+    "recap",
+    "config",
+    "account_news",
+    "salesforce_client",
+    "news_search",
+    "news_classifier",
+]

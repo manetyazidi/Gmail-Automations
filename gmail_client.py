@@ -120,6 +120,29 @@ class GmailClient:
         )
         return sent["id"]
 
+    def send_self_html(
+        self,
+        *,
+        from_addr: str,
+        subject: str,
+        text_body: str,
+        html_body: str,
+    ) -> str:
+        msg = EmailMessage()
+        msg["From"] = from_addr
+        msg["To"] = from_addr
+        msg["Subject"] = subject
+        msg.set_content(text_body)
+        msg.add_alternative(html_body, subtype="html")
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        sent = (
+            self._service.users()
+            .messages()
+            .send(userId="me", body={"raw": raw})
+            .execute()
+        )
+        return sent["id"]
+
 
 def _escape_subject(subject: str) -> str:
     # Gmail search strips most punctuation; quoting is enough.
