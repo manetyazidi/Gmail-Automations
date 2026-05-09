@@ -43,6 +43,48 @@ def _required(name: str) -> str:
     return value
 
 
+def _has_account_csvs(accounts_dir: Path) -> bool:
+    return accounts_dir.exists() and any(accounts_dir.glob("*.csv"))
+
+
+def _prompt_upload_csv(accounts_dir: Path) -> None:
+    accounts_dir.mkdir(exist_ok=True)
+    print()
+    print("=" * 70)
+    print("No account CSV files found in 'accounts/'.")
+    print()
+    print("To get news for an AE, you need to add a CSV file:")
+    print(f"  1. Drag-drop the AE's account export into the '{accounts_dir}/' folder")
+    print("     (left-side file explorer in your codespace)")
+    print("  2. Rename it to <ae_name>.csv (e.g. lauren_tabler.csv)")
+    print("  3. The file just needs a header row with 'Account Name' column.")
+    print("     6sense exports work as-is.")
+    print("=" * 70)
+    print()
+    while True:
+        answer = input("Press Enter once the CSV is uploaded (or type 'q' to quit): ").strip().lower()
+        if answer == "q":
+            sys.exit(0)
+        if _has_account_csvs(accounts_dir):
+            print(f"OK: found {len(list(accounts_dir.glob('*.csv')))} CSV file(s).")
+            print()
+            return
+        print(f"Still no CSV files in '{accounts_dir}/'. Try again.")
+
+
+def _prompt_email() -> str:
+    print()
+    print("=" * 70)
+    print("Enter the Gmail/Vanta address you authorized in gmail_oauth_setup.py.")
+    print("This is also the address that will receive the daily digest.")
+    print("=" * 70)
+    while True:
+        email = input("Your Vanta email: ").strip()
+        if "@" in email and "." in email.split("@", 1)[1]:
+            return email
+        print("That doesn't look like an email address. Try again.")
+
+
 def run(*, dry_run: bool = False) -> int:
     load_dotenv()
     logging.basicConfig(
@@ -50,18 +92,33 @@ def run(*, dry_run: bool = False) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+
     accounts_dir = Path(os.environ.get("ACCOUNTS_DIR", "accounts"))
-    tier_filter = parse_tier_filter(os.environ.get("TIER_FILTER"))
+    if not _has_account_csvs(accounts_dir):
+        if interactive:
+            _prompt_upload_csv(accounts_dir)
+        else:
+            logger.error("No AE CSV files found in %s", accounts_dir)
+            return 1
+
+    tier_raw = os.environ.get("TIER_FILTER", "1,2")
+    tier_filter = parse_tier_filter(tier_raw)
     aes = load_aes(accounts_dir, tier_filter=tier_filter)
-    if not aes:
-        logger.error("No AE CSV files found in %s", accounts_dir)
+    if not aes or not any(ae.accounts for ae in aes):
+        logger.error("No accounts loaded from %s", accounts_dir)
         return 1
 
     google_api_key = os.environ.get("GOOGLE_API_KEY")
     google_cse_id = os.environ.get("GOOGLE_CSE_ID")
     lookback_hours = int(os.environ.get("NEWS_LOOKBACK_HOURS", "24"))
 
-    gmail_sender = _required("GMAIL_SENDER")
+    gmail_sender = os.environ.get("GMAIL_SENDER")
+    if not gmail_sender:
+        if interactive:
+            gmail_sender = _prompt_email()
+        else:
+            raise RuntimeError("Missing required environment variable: GMAIL_SENDER")
     digest_to = os.environ.get("DIGEST_TO") or gmail_sender
 
     gmail: GmailClient | None = None
