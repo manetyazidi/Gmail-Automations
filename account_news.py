@@ -182,8 +182,48 @@ def _gather_reports(
         except Exception as exc:
             logger.exception("News search failed for %s: %s", account.name, exc)
             hits = []
-        reports.append(AccountReport(account=account, hits=classify_all(hits)))
+        relevant = [h for h in hits if _is_about_account(h, account.name)]
+        if hits and len(relevant) < len(hits):
+            logger.debug(
+                "%s: filtered %d/%d hits by name match",
+                account.name, len(hits) - len(relevant), len(hits),
+            )
+        reports.append(AccountReport(account=account, hits=classify_all(relevant)))
     return reports
+
+
+def _is_about_account(hit, account_name: str) -> bool:
+    """Require the account name (or a strong variant) to appear in the title.
+
+    Cuts false positives like 'Anaconda' (city in MT), 'Twins' (baseball
+    team), and 'Acoustic' (adjective) where the search engine returned
+    unrelated articles that happened to mention M&A/funding/IPO.
+    """
+    name = account_name.strip().lower()
+    title = (hit.title or "").lower()
+    snippet = (hit.snippet or "").lower()
+
+    # Strict: full account name in title.
+    if name in title:
+        return True
+    # Lenient fallback: full name in the first 200 chars of snippet
+    # (covers cases where the title got truncated by the source).
+    if name in snippet[:200]:
+        return True
+
+    # Strip common corporate suffixes and retry once: "ANI Pharmaceuticals, Inc."
+    # should still match "ANI Pharmaceuticals" in a headline.
+    stripped = name
+    for suffix in [", inc.", ", inc", " inc.", " inc", " corp", " corporation",
+                   " llc", " ltd", " limited", " plc", " ag", " gmbh", " co."]:
+        if stripped.endswith(suffix):
+            stripped = stripped[: -len(suffix)].strip()
+            break
+    if stripped != name and len(stripped) >= 4:
+        if stripped in title or stripped in snippet[:200]:
+            return True
+
+    return False
 
 
 def _compose_email(
