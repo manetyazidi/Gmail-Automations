@@ -111,8 +111,8 @@ def run(*, dry_run: bool = False, limit: int | None = None,
         logger.error("No accounts loaded from %s", accounts_dir)
         return 1
 
-    google_api_key = os.environ.get("GOOGLE_API_KEY")
-    google_cse_id = os.environ.get("GOOGLE_CSE_ID")
+    google_api_key = (os.environ.get("GOOGLE_API_KEY") or "").strip() or None
+    google_cse_id = (os.environ.get("GOOGLE_CSE_ID") or "").strip() or None
     lookback_hours = lookback_hours_override or int(
         os.environ.get("NEWS_LOOKBACK_HOURS", "24")
     )
