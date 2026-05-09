@@ -85,7 +85,9 @@ def _prompt_email() -> str:
         print("That doesn't look like an email address. Try again.")
 
 
-def run(*, dry_run: bool = False) -> int:
+def run(*, dry_run: bool = False, limit: int | None = None,
+        include_names: list[str] | None = None,
+        lookback_hours_override: int | None = None) -> int:
     load_dotenv()
     logging.basicConfig(
         level=logging.INFO,
@@ -111,7 +113,20 @@ def run(*, dry_run: bool = False) -> int:
 
     google_api_key = os.environ.get("GOOGLE_API_KEY")
     google_cse_id = os.environ.get("GOOGLE_CSE_ID")
-    lookback_hours = int(os.environ.get("NEWS_LOOKBACK_HOURS", "24"))
+    lookback_hours = lookback_hours_override or int(
+        os.environ.get("NEWS_LOOKBACK_HOURS", "24")
+    )
+
+    if include_names:
+        wanted = {n.strip().lower() for n in include_names if n.strip()}
+        for ae in aes:
+            ae.accounts = [
+                a for a in ae.accounts
+                if any(w in a.name.lower() or a.name.lower() in w for w in wanted)
+            ]
+    if limit:
+        for ae in aes:
+            ae.accounts = ae.accounts[:limit]
 
     gmail_sender = os.environ.get("GMAIL_SENDER")
     if not gmail_sender:
@@ -339,8 +354,26 @@ def main() -> int:
     parser.add_argument(
         "--dry-run", action="store_true", help="Print emails instead of sending"
     )
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="Process only the first N accounts (testing)"
+    )
+    parser.add_argument(
+        "--include", default=None,
+        help="Comma-separated account name substrings to include (testing)"
+    )
+    parser.add_argument(
+        "--lookback-hours", type=int, default=None,
+        help="Override news lookback window in hours (default 24)"
+    )
     args = parser.parse_args()
-    return run(dry_run=args.dry_run)
+    include = [s for s in (args.include or "").split(",") if s.strip()] or None
+    return run(
+        dry_run=args.dry_run,
+        limit=args.limit,
+        include_names=include,
+        lookback_hours_override=args.lookback_hours,
+    )
 
 
 if __name__ == "__main__":
